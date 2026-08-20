@@ -6,6 +6,8 @@ Production API transforming dispersed Iowa government datasets into a queryable 
 
 **Stack:** Python 3.12, FastAPI, Uvicorn, Turso/libsql, Stripe, Docker, Google Cloud Run, Jinja2, Pico CSS, Plotly.js
 
+**Live:** [api.midwestintel.com](https://api.midwestintel.com/) · **API docs:** [api.midwestintel.com/docs](https://api.midwestintel.com/docs)
+
 ## Twitch AI Clip Miner — Multi-Signal Video Highlight Engine
 
 An offline, GPU-accelerated pipeline that analyzes Twitch VODs across four independent detection signals (audio loudness, transcript analysis, chat velocity, facial expression recognition) to identify viral moments and export vertically-cropped clips for TikTok/Shorts.
@@ -13,6 +15,8 @@ An offline, GPU-accelerated pipeline that analyzes Twitch VODs across four indep
 - Handles 10+ hour VODs with resumable chunked processing
 - Auto-detects NVIDIA CUDA, AMD Vulkan, or CPU fallback
 - Fully local — no API keys, no cloud dependencies
+
+**Repo:** [github.com/jamesbaughnd/twitch-clip-miner](https://github.com/jamesbaughnd/twitch-clip-miner)
 
 ## Argus Master Control Panel — Desktop Application
 
@@ -27,6 +31,8 @@ Complete Matthew Oliver Goodwin numerology engine: 20+ calculation types, intera
 ## Duplicate Remover Pro — Standalone Windows Utility
 
 Commercial-grade .exe with intelligent column-level duplicate detection and merging. Packaged with PyInstaller for zero-dependency distribution.
+
+**Buy:** [jamesbaughnd.gumroad.com/l/providecoin](https://jamesbaughnd.gumroad.com/l/providecoin)
 
 ## Twitch AI Chat Bots — Multi-Agent Chat System
 
