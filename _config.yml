@@ -1,0 +1,10 @@
+# _config.yml for GitHub Pages
+title: TheOneEyedArgus
+description: AI-Augmented Security Research, Software Engineering & Technical Strategy
+markdown: kramdown
+theme: jekyll-theme-cayman
+
+# Optional but recommended
+github:
+  is_project_page: false
+  is_user_page: true

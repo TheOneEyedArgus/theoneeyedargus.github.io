@@ -1,0 +1,2296 @@
+<!DOCTYPE html>
+<html lang="en-US">
+  <head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+<!-- Begin Jekyll SEO tag v2.8.0 -->
+<title>Dissecting an Undocumented Lua-Wrapped Loader: The BoldTealLayer Campaign | TheOneEyedArgus</title>
+<meta name="generator" content="Jekyll v3.10.0" />
+<meta property="og:title" content="Dissecting an Undocumented Lua-Wrapped Loader: The BoldTealLayer Campaign" />
+<meta property="og:locale" content="en_US" />
+<link rel="canonical" href="https://theoneeyedargus.github.io/" />
+<meta property="og:url" content="https://theoneeyedargus.github.io/" />
+<meta property="og:site_name" content="TheOneEyedArgus" />
+<meta property="og:type" content="website" />
+<meta name="twitter:card" content="summary" />
+<meta property="twitter:title" content="Dissecting an Undocumented Lua-Wrapped Loader: The BoldTealLayer Campaign" />
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"WebSite","headline":"Dissecting an Undocumented Lua-Wrapped Loader: The BoldTealLayer Campaign","name":"TheOneEyedArgus","url":"https://theoneeyedargus.github.io/"}</script>
+<!-- End Jekyll SEO tag -->
+
+    <link rel="stylesheet" href="/assets/css/style.css?v=cac0101f61d2e190a89810a546821739adb12a1c">
+    <!-- start custom head snippets, customize with your own _includes/head-custom.html file -->
+
+<!-- Setup Google Analytics -->
+
+
+
+<!-- You can set your favicon here -->
+<!-- link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" -->
+
+<!-- end custom head snippets -->
+
+  </head>
+  <body>
+    <div class="container-lg px-3 my-5 markdown-body">
+      
+      <h1><a href="https://theoneeyedargus.github.io/">TheOneEyedArgus</a></h1>
+      
+
+      <h1 id="dissecting-an-undocumented-lua-wrapped-loader-the-boldteallayer-campaign">Dissecting an Undocumented Lua-Wrapped Loader: The BoldTealLayer Campaign</h1>
+
+<p><strong>Author:</strong> TheOneEyedArgus<br />
+<strong>Date:</strong> 2026-05-29<br />
+<strong>Classification:</strong> Public</p>
+
+<hr />
+
+<h2 id="executive-summary">Executive Summary</h2>
+
+<p>In early 2026, while investigating unexplained high memory usage on my Windows 11 system, I discovered a plaintext debug log file (<code class="language-plaintext highlighter-rouge">lua_traceback.log</code>) left in the <code class="language-plaintext highlighter-rouge">C:\temp</code> directory. The log detailed the real‑time actions of a previously undocumented malware loader. Despite being actively executed, the threat evaded detection by multiple up‑to‑date antivirus engines, including Microsoft Defender, Malwarebytes, and ESET.</p>
+
+<p>The loader employs a multi‑stage attack chain. It uses a legitimate, digitally signed executable (<code class="language-plaintext highlighter-rouge">active_desktop_launcher.exe</code>) to side‑load a malicious DLL (<code class="language-plaintext highlighter-rouge">active_desktop_render_x64.dll</code>). This DLL then loads a Lua scripting engine to execute an obfuscated script that systematically dismantles Windows security mechanisms—patching Event Tracing for Windows, restoring a clean copy of <code class="language-plaintext highlighter-rouge">ntdll.dll</code> to remove user‑mode hooks, and employing a rare hardware breakpoint to bypass the Antimalware Scan Interface (AMSI). With all defences neutralised, a .NET assembly is injected directly into memory and executed. <strong>Based on this custom evasion chain, this is the most sophisticated malware I have personally analysed, combining a legitimate signed host with an advanced, fileless Lua-driven payload</strong>.</p>
+
+<p>This report provides the first public analysis of this campaign. Unique Indicators of Compromise (IOCs) extracted from the debug log, registry persistence mechanism, and file hashes are presented here for the first time. The core malicious DLL (<code class="language-plaintext highlighter-rouge">active_desktop_render_x64.dll</code>) has no prior VirusTotal report and zero detections across all major engines, indicating that this threat has flown completely under the radar of the automated threat intelligence ecosystem.</p>
+
+<p>Organisations and individuals should deploy the included YARA rule to detect the loader’s unique debug strings, monitor for the registry key <code class="language-plaintext highlighter-rouge">BoldTealLayer150</code>, and block communication with the distribution IP <code class="language-plaintext highlighter-rouge">143.92.51.20</code>.</p>
+
+<hr />
+
+<h2 id="methodology-and-tools">Methodology and Tools</h2>
+
+<p>Before diving into the full report, I want to mention what tools and resources I used during this process. This investigation was conducted manually, with no automated sandbox or formal analysis environment. I relied purely on Windows built-in tools (Task Manager, Registry Editor), Sysinternals utilities (Autoruns), and open-source intelligence platforms (VirusTotal, URLScan, AlienVault OTX, Triage). Throughout much of the process, I used a local AI assistant (an Abliterated DeepSeek) as a thinking partner—to brainstorm search locations, cross-reference technical concepts, and help structure the analysis. Every finding, IOC, and conclusion was independently and thoroughly verified by me.</p>
+
+<hr />
+
+<h2 id="1-discovery--initial-triage">1. Discovery &amp; Initial Triage</h2>
+
+<p>On 27 May 2026, I noticed my system—with 16 GB of RAM—was consistently reporting over 70–80% memory usage, even when no demanding applications were running. Windows Task Manager showed no single process using more than 500 MB. This time, instead of dismissing it as just “Windows being weird,” I began a manual search for the missing gigabytes.</p>
+
+<p>I focused on temporary or unusual directories where malware often hides artifacts. In <code class="language-plaintext highlighter-rouge">C:\temp</code>, I found an unfamiliar file: <code class="language-plaintext highlighter-rouge">lua_traceback.log</code>. Opening it revealed a verbose, developer‑style debug log that clearly belonged to a live, active piece of malware.</p>
+
+<p><img width="496" height="478" alt="Screenshot_2026-05-27_Lua Log" src="https://github.com/user-attachments/assets/85356a25-1f69-4268-bbc6-002a0939623b" /></p>
+
+<p>Figure 1 – Snippet of the lua_traceback.log file found in C:\temp, viewed in a simple text editor.</p>
+
+<p>The log contained lines like <code class="language-plaintext highlighter-rouge">anti-emu: passed</code>, <code class="language-plaintext highlighter-rouge">ETW: patched 2 functions</code>, and <code class="language-plaintext highlighter-rouge">AMSI-VEH: DR0 armed on AmsiScanBuffer</code>. I immediately recognised these as anti‑detection and evasion techniques. The final lines showed a .NET assembly being loaded directly into memory—a classic fileless execution technique.</p>
+
+<p>I initially used Microsoft Defender, which detected <code class="language-plaintext highlighter-rouge">active_desktop_launcher.exe</code> and flagged it as a threat. I then downloaded and ran Malwarebytes, which scooped up many of the <code class="language-plaintext highlighter-rouge">.exe</code> clones (all within <code class="language-plaintext highlighter-rouge">C:\ProgramData\</code>). In an effort to be thorough, I ran the ESET Online Scanner, which found one more <code class="language-plaintext highlighter-rouge">.exe</code>. Confident it was gone, I restarted my computer. When I logged back in, Task Manager showed another instance of the launcher. This time, when I ran Defender, Malwarebytes, and ESET again, none recognised it as a threat.</p>
+
+<p>I disconnected my internet and ran full scans with the whole suite: Microsoft Defender, Malwarebytes, ESET Online Scanner, and also added RogueKiller (Adlice Protect) to the stack. All came back clean. The malware had not only evaded real‑time protection but also scrubbed any trace that scanners could find—despite being back and actively running. The log was my last and only clue.</p>
+
+<p>Armed with the log—and because I’m a relentlessly stubborn nerd—I manually traced the infection. I found a persistence registry entry named <code class="language-plaintext highlighter-rouge">BoldTealLayer150</code> and located the three files involved in the attack: a legitimate signed executable, a malicious side‑loaded DLL, and a Lua interpreter. The sections below detail each component.</p>
+
+<hr />
+
+<h2 id="2-technical-analysis">2. Technical Analysis</h2>
+
+<h3 id="21-the-debug-log-a-blowbyblow-of-the-attack">2.1 The Debug Log: A Blow‑by‑Blow of the Attack</h3>
+
+<p>The <code class="language-plaintext highlighter-rouge">lua_traceback.log</code> is the centrepiece of this analysis. It reads like a developer’s test output, detailing every step of the loader’s operation. Below is a sanitised excerpt with explanatory annotations.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>=== DBG INIT OK ===           // Debug mode initialised
+=== Lua payload START ===     // The malicious Lua script begins execution
+anti-emu: passed              // Anti‑sandbox/VM check passed; real machine detected
+payload detect: .NET 913408 bytes      // A .NET payload of 913,408 bytes is detected
+ETW: patched 2 functions (variant 5)   // Event Tracing for Windows patched to blind security software
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes) // A fresh ntdll.dll is loaded from disk
+unhook: restored 17/17 functions       // All 17 previously hooked functions are restored to their original code
+AMSI-VEH: VEH registered               // A Vectored Exception Handler is set up
+AMSI-VEH: DR0 armed on AmsiScanBuffer  // Hardware breakpoint placed on AmsiScanBuffer to bypass AMSI scanning
+cleanup: DR0-DR3 cleared, VEH removed  // Cleanup after AMSI bypass is achieved
+mutex: acquired (single instance)      // A mutex ensures only one instance runs
+persist: reg run set (BoldTealLayer150)// Persistence is set via the Run registry key
+launching CLR payload (blocking)...    // The .NET Common Language Runtime is about to be invoked
+AMSI-VEH: VEH registered               // The AMSI bypass is set up again (probably before loading .NET)
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000     // .NET runtime binding successful
+CLR: Start hr=0x00000000       // .NET runtime started
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes   // Payload is placed into a safe array
+CLR: Load_3 vtable[44] hr=0x80131047   // Initial load attempt fails
+CLR: Load_3 vtable[45] hr=0x00000000 OK  // Alternative loading method succeeds
+CLR: EntryPoint vtable[16] OK   // Entry point found
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E     // First invocation call fails
+CLR: retrying Invoke_3 with null args  // Retry with null arguments
+</code></pre></div></div>
+
+<p><strong>What This Reveals:</strong></p>
+<ul>
+  <li>The loader is entirely Lua‑driven, using a standard Lua 5.1 interpreter (<code class="language-plaintext highlighter-rouge">lua51.dll</code>).</li>
+  <li>It systematically dismantles Windows security: first blinding ETW, then unhooking <code class="language-plaintext highlighter-rouge">ntdll</code>, and finally bypassing AMSI with a hardware breakpoint—a sophisticated and relatively uncommon technique.</li>
+  <li>The final payload is a .NET assembly that is never written to disk. It is loaded entirely from memory, making traditional file‑based detection useless.</li>
+  <li>The log’s existence and format are unique; searches for these exact strings returned zero results, confirming this is a previously undocumented custom tool.</li>
+</ul>
+
+<p><strong>An additional note on the log</strong>: beyond the technical details, the existence of this plaintext log in <code class="language-plaintext highlighter-rouge">C:\temp</code> is a significant operational security lapse by the malware’s developer. For all the loader’s advanced evasion, this debug artifact handed me a detailed, near step‑by‑step playbook of the entire attack. It underscores a timeless lesson for defenders—even highly capable adversaries can make mistakes, and manual inspection of overlooked directories can sometimes uncover threats that automated scanners miss entirely.</p>
+
+<h3 id="22-persistence-mechanism">2.2 Persistence Mechanism</h3>
+
+<p>The malware ensures its survival across reboots by using a simple registry Run key. I found it in several locations within the registry.</p>
+
+<p><img width="1195" height="792" alt="Screenshot_2026-05-27_RegistryLocation" src="https://github.com/user-attachments/assets/4ce79c39-20d7-43a0-8a51-02a2d3d2aa45" text="screenshot" /></p>
+
+<p>Figure 2 – Registry Editor showing one of the persistence locations. I initially found it in <code class="language-plaintext highlighter-rouge">HKCU\...\Run</code> but I was rather eager to get rid of the lil bugger (to say it without explitive) so I deleted the file before taking a screenshot. The image shows an alternate location.</p>
+
+<p><strong>Primary Path:</strong> <code class="language-plaintext highlighter-rouge">HKCU\Software\Microsoft\Windows\CurrentVersion\Run</code><br />
+<strong>Value:</strong> <code class="language-plaintext highlighter-rouge">BoldTealLayer150</code><br />
+<strong>Data:</strong> <code class="language-plaintext highlighter-rouge">"C:\ProgramData\BoldTealLayer150\active_desktop_launcher.exe"</code></p>
+
+<p>I also found another copy of the launcher in <code class="language-plaintext highlighter-rouge">C:\ProgramData\Microsoft Display Manager\active_desktop_launcher.exe</code>.</p>
+
+<p>Interestingly, while the initial infection scattered multiple copies across oddly‑named temporary directories, the malware’s resurrection behaviour was limited to restoring only a single file to its primary folder (<code class="language-plaintext highlighter-rouge">BoldTealLayer150</code>). This suggests the persistence logic was hardcoded for a single path, lacking the redundant mechanisms typical of mature malware. Combined with the existence of the debug log, this points to a tool deployed without full operational hardening—perhaps a test/debug build, or an operator lacking the skill to fully weaponise the loader.</p>
+
+<h3 id="23-the-malicious-file-trio">2.3 The Malicious File Trio</h3>
+
+<p>Three files worked in concert to achieve the infection. I safely hashed them without execution.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="text-align: left">File</th>
+      <th style="text-align: left">SHA256</th>
+      <th style="text-align: left">Role</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">active_desktop_launcher.exe</code></td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">f712c2a8b4abf2e299a2b480020333deb0f43364e9686cda78b1243c62e4830d</code></td>
+      <td style="text-align: left">Legitimate, signed KuGou executable used as a host for DLL side‑loading.</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">active_desktop_render_x64.dll</code></td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">3E45C86A43F2F742BCE4232CCF2228375726983DE80BE3A5CA990584E66382D0</code></td>
+      <td style="text-align: left">Malicious DLL that loads the Lua engine and executes the script. No prior VT report exists.</td>
+    </tr>
+    <tr>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">lua51.dll</code></td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">0846af7812733617e900caf8ccccaae65335ff915584a6fa368eb3e8bfd46604</code></td>
+      <td style="text-align: left">Standard Lua 5.1 interpreter DLL, used to run the obfuscated script.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>DLL Side‑Loading:</strong> The signed <code class="language-plaintext highlighter-rouge">active_desktop_launcher.exe</code> loads <code class="language-plaintext highlighter-rouge">active_desktop_render_x64.dll</code> upon execution, either via a renamed legitimate dependency or by DLL search‑order hijacking. Because the host is validly signed, some security products may trust the process.</p>
+
+<h3 id="24-the-evasion-chain">2.4 The Evasion Chain</h3>
+
+<p>The loader’s evasion sequence is a masterclass in blinding user‑mode security. I reconstructed the chain from the debug log and dynamic sandbox telemetry (from VirusTotal for <code class="language-plaintext highlighter-rouge">lua51.dll</code>):</p>
+
+<ol>
+  <li><strong>Anti‑Emulation Check:</strong> The script first verifies whether or not it’s running in a sandbox/VM by checking specific registry keys. If it detects an analysis environment, it exits cleanly, otherwise proceeds.</li>
+  <li><strong>ETW Patching:</strong> Two functions within <code class="language-plaintext highlighter-rouge">EtW.dll</code> are patched to prevent security software from receiving event logs about process activity.</li>
+  <li><strong>ntdll Unhooking:</strong> A pristine copy of <code class="language-plaintext highlighter-rouge">ntdll.dll</code> is loaded from <code class="language-plaintext highlighter-rouge">KnownDlls</code>, and 17 functions are restored to their original state. This removes any hooks placed by EDR/AV software.</li>
+  <li><strong>AMSI Bypass via Hardware Breakpoint:</strong> A Vectored Exception Handler is registered, and a hardware breakpoint (DR0) is set on <code class="language-plaintext highlighter-rouge">AmsiScanBuffer</code>. When any software calls this function to scan memory for malicious content, a breakpoint exception is triggered. The handler intercepts it and likely returns a “clean” result, effectively disabling AMSI for all processes.</li>
+  <li><strong>.NET Injection:</strong> With all monitoring blind, the script loads the .NET CLR into the current process, creates a safe array containing the 913,408‑byte payload, and invokes its entry point—entirely without writing the payload to disk.</li>
+</ol>
+
+<p>The MITRE ATT&amp;CK MBC behavior catalog for <code class="language-plaintext highlighter-rouge">lua51.dll</code> (from automated sandbox runs on VirusTotal) further confirmed these actions: anti‑VM checks, Base64/XOR decoding, process injection, and registry persistence.</p>
+
+<h3 id="25-the-final-payload">2.5 The Final Payload</h3>
+
+<p>The log shows a .NET assembly of 913,408 bytes is injected and executed. I did not perform a full reverse engineering of the .NET code, but the initial discovery context (the system was flagged as <code class="language-plaintext highlighter-rouge">Trojan:Win32/Zusy!MTB</code> by Windows Defender <em>after</em> I removed the loader) suggests the payload may be a banking Trojan or information stealer. However, I refrain from definitive classification and simply note that the loader is capable of executing <em>any</em> .NET‑based payload.</p>
+
+<hr />
+
+<h2 id="3-automated-sandbox--community-intelligence">3. Automated Sandbox &amp; Community Intelligence</h2>
+
+<p>I analysed the three files on VirusTotal without uploading them (only hash searches were performed).</p>
+
+<ul>
+  <li><strong><code class="language-plaintext highlighter-rouge">active_desktop_launcher.exe</code>:</strong> Detected by 0/70 engines. Community comments noted it was signed and “suspicious,” but risk was deferred to the companion DLL. A YARA rule from the zbetcheckin tracker flagged the file for containing debug output strings and anti‑debug code.</li>
+  <li><strong><code class="language-plaintext highlighter-rouge">lua51.dll</code>:</strong> Detected by 0/70 engines. Behavioural sandboxes produced a rich MBC tree showing VM detection, process injection, registry modification, and obfuscation (Base64/XOR). This perfectly aligned with the log.</li>
+  <li><strong><code class="language-plaintext highlighter-rouge">active_desktop_render_x64.dll</code>:</strong> At the time of writing, this file has <strong>no VirusTotal report at all</strong>—the hash returns “Item not found.” This means it has never been uploaded or analysed by any public sandbox. Therefore, the manual analysis in this report is the first public documentation of this component’s role.</li>
+</ul>
+
+<p><img width="1919" height="1040" alt="Screenshot_2026-05-28_VirusTotalUnseen" src="https://github.com/user-attachments/assets/c8a6e04d-8c3c-496c-bffe-45098cd1d5d3" />
+<img width="1918" height="1034" alt="Screenshot_2026-05-28_VirusTotalUnseen2" src="https://github.com/user-attachments/assets/3d222593-2d2b-485c-8eec-f0d2b0bb9586" /></p>
+
+<p>Figure 3 – The empty VirusTotal pages for active_desktop_render_x64.dll</p>
+
+<p>To further validate the novelty of this threat, I searched <em>extensively</em> for the malicious DLL’s SHA256 hash, the filename <code class="language-plaintext highlighter-rouge">active_desktop_render_x64.dll</code>, and the unique string <code class="language-plaintext highlighter-rouge">BoldTealLayer150</code> across multiple open‑source threat intelligence platforms. None returned any hits:</p>
+
+<ul>
+  <li><strong>AlienVault OTX:</strong> No pulses or indicators matched.</li>
+  <li><strong>Triage (tria.ge):</strong> No sandbox reports or analyses existed.</li>
+  <li><strong>URLScan.io:</strong> No scans contained the DLL hash or filename.</li>
+</ul>
+
+<p>These empty results, combined with the absent VirusTotal report and the total lack of <em>any mention</em> of <code class="language-plaintext highlighter-rouge">BoldTealLayer150</code> across multiple search engines, confirm that the core malicious component had never been publicly documented or analysed prior to this report.</p>
+
+<p>In contrast, the distribution IP <code class="language-plaintext highlighter-rouge">143.92.51.20</code> was well‑documented on URLScan. It has been actively serving multiple suspicious executables, especially within the last year, including <code class="language-plaintext highlighter-rouge">RuntimeBroker.exe</code>, <code class="language-plaintext highlighter-rouge">package.rar</code>, <code class="language-plaintext highlighter-rouge">installer.exe</code>, and many other variations. This indicates my infection is part of a wider, multi‑forked campaign using a common delivery server.</p>
+
+<hr />
+
+<h2 id="4-indicators-of-compromise-iocs">4. Indicators of Compromise (IOCs)</h2>
+
+<p>The following IOCs can be used to detect or block this threat. All strings and hashes have been verified as unique to this campaign at the time of publication.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="text-align: left">IOC Type</th>
+      <th style="text-align: left">Value</th>
+      <th style="text-align: left">Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: left">Debug log strings</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">=== DBG INIT OK ===</code><br /><code class="language-plaintext highlighter-rouge">ETW: patched 2 functions (variant 5)</code><br /><code class="language-plaintext highlighter-rouge">AMSI-VEH: DR0 armed on AmsiScanBuffer</code><br /><code class="language-plaintext highlighter-rouge">BoldTealLayer150</code></td>
+      <td style="text-align: left">Can be detected via YARA or file content scanning.</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">Registry key (primary)</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">HKCU\Software\Microsoft\Windows\CurrentVersion\Run\BoldTealLayer150</code></td>
+      <td style="text-align: left">Persistence</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">Registry key (secondary)</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">HKEY_USERS\UserSID\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run</code></td>
+      <td style="text-align: left">Found on system; actual SID will vary</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">File path (debug artifact)</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">C:\Temp\lua_traceback.log</code></td>
+      <td style="text-align: left">May be deleted by malware, but present at time of discovery</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">File path (potential original folder)</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">%LOCALAPPDATA%\TEMP\BoldTealLayer150\</code></td>
+      <td style="text-align: left">Folder containing the signed loader</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">File path (potential secondary copy)</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">C:\ProgramData\Microsoft Display Manager\</code></td>
+      <td style="text-align: left">Additional copy location</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">SHA256 – signed loader</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">f712c2a8b4abf2e299a2b480020333deb0f43364e9686cda78b1243c62e4830d</code></td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">active_desktop_launcher.exe</code></td>
+    </tr>
+    <tr>
+      <td style="text-align: left">SHA256 – malicious DLL</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">3E45C86A43F2F742BCE4232CCF2228375726983DE80BE3A5CA990584E66382D0</code></td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">active_desktop_render_x64.dll</code></td>
+    </tr>
+    <tr>
+      <td style="text-align: left">SHA256 – Lua interpreter</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">0846af7812733617e900caf8ccccaae65335ff915584a6fa368eb3e8bfd46604</code></td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">lua51.dll</code></td>
+    </tr>
+    <tr>
+      <td style="text-align: left">Network IP</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">143.92.51.20</code></td>
+      <td style="text-align: left">Distribution server</td>
+    </tr>
+    <tr>
+      <td style="text-align: left">Network URL</td>
+      <td style="text-align: left"><code class="language-plaintext highlighter-rouge">http://143.92.51.20/RuntimeBroker.exe</code></td>
+      <td style="text-align: left">Original download URL (from VirusTotal community)</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr />
+
+<h2 id="5-detection-guidance--yara-rule">5. Detection Guidance &amp; YARA Rule</h2>
+
+<p>Organisations should implement the following measures:</p>
+
+<ul>
+  <li>Deploy the YARA rule below to scan files, memory, or logs for the loader’s unique debug strings.</li>
+  <li>Monitor registry run keys for unusual names like <code class="language-plaintext highlighter-rouge">BoldTealLayer150</code>.</li>
+  <li>Block outbound traffic to IP <code class="language-plaintext highlighter-rouge">143.92.51.20</code> and any domain resolving to it.</li>
+  <li>Investigate the presence of <code class="language-plaintext highlighter-rouge">lua51.dll</code> and <code class="language-plaintext highlighter-rouge">active_desktop_render_x64.dll</code> on systems, especially in non‑standard directories.</li>
+</ul>
+
+<p><strong>YARA Rule:</strong></p>
+
+<pre><code class="language-yara">rule BoldTealLayer150_DebugLog {
+    meta:
+        description = "Detects the unique debug strings of the Lua-wrapped loader documented in this report"
+        author = "TheOneEyedArgus"
+        date = "2026-05-29"
+        reference = "https://theoneeyedargus.github.io"
+    strings:
+        $s1 = "=== DBG INIT OK ==="
+        $s2 = "ETW: patched 2 functions (variant 5)"
+        $s3 = "AMSI-VEH: DR0 armed on AmsiScanBuffer"
+        $s4 = "BoldTealLayer150"
+    condition:
+        any of them
+}
+</code></pre>
+
+<p>This rule can be used with standard malware scanning tools like <code class="language-plaintext highlighter-rouge">yara64.exe</code> or integrated into Loki Scanner.</p>
+
+<hr />
+
+<h2 id="6-conclusion">6. Conclusion</h2>
+
+<p>This investigation uncovered a highly evasive, custom malware loader that had completely bypassed the modern AV/EDR ecosystem. Its use of a legitimate signed binary, a Lua‑based orchestrator, and advanced anti‑detection techniques (ETW patching, ntdll unhooking, hardware breakpoint AMSI bypass) allowed it to operate silently for an unknown period. The accidental inclusion of a verbose debug log provided a rare glimpse into its inner workings.</p>
+
+<p>The fact that the core malicious DLL remains undetected and unanalysed on VirusTotal as of this writing highlights a gap in automated threat intelligence that manual hunting can fill. I hope this report assists other defenders in identifying and neutralizing similar threats.</p>
+
+<p>While not exploiting a zero‑day vulnerability, this malware represents a previously undocumented and fully undetected threat employing advanced, custom evasion techniques. To my knowledge, this is the first public analysis of this specific loader and its unique indicators.</p>
+
+<hr />
+
+<h2 id="appendix-a-raw-log-excerpt">Appendix A: Raw Log Excerpt</h2>
+
+<p>Below is the complete, <strong>unedited</strong> contents of the <code class="language-plaintext highlighter-rouge">lua_traceback.log</code> as found on the infected system. The file contains repeated execution blocks, each beginning with <code class="language-plaintext highlighter-rouge">=== DBG INIT OK ===</code>, representing multiple attempts by the malware to launch. Variations in the ETW patching variant number and the sequence of evastion steps can be observed across these iterations.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 5)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 4)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 1)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+ETW: patched 2 functions (variant 1)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 1)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 1)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+ETW: patched 2 functions (variant 1)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+ETW: patched 2 functions (variant 1)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+ETW: patched 2 functions (variant 5)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+ETW: patched 2 functions (variant 1)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 1)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+ETW: patched 2 functions (variant 1)
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+ETW: patched 2 functions (variant 2)
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 5)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+ETW: patched 2 functions (variant 3)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 5)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+ETW: patched 2 functions (variant 3)
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 1)
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 4)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+ETW: patched 2 functions (variant 1)
+cleanup: DR0-DR3 cleared, VEH removed
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+unhook: restored 17/17 functions
+mutex: acquired (single instance)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+ETW: patched 2 functions (variant 2)
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 5)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+ETW: patched 2 functions (variant 3)
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+ETW: patched 2 functions (variant 1)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+stomp: no code cave found
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 4)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+ETW: patched 2 functions (variant 2)
+ETW: patched 2 functions (variant 5)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 4)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 4)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 5)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 5)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+ETW: patched 2 functions (variant 3)
+ETW: patched 2 functions (variant 4)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 5)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+ETW: patched 2 functions (variant 4)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+ETW: patched 2 functions (variant 1)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 4)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 1)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+ETW: patched 2 functions (variant 4)
+ETW: patched 2 functions (variant 3)
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+ETW: patched 2 functions (variant 1)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 4)
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+ETW: patched 2 functions (variant 3)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 4)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+ETW: patched 2 functions (variant 1)
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+ETW: patched 2 functions (variant 3)
+ETW: patched 2 functions (variant 4)
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+ETW: patched 2 functions (variant 1)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+ETW: patched 2 functions (variant 2)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 5)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+ETW: patched 2 functions (variant 4)
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+ETW: patched 2 functions (variant 3)
+CLR: retrying Invoke_3 with null args
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 1)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 4)
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+ETW: patched 2 functions (variant 5)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 4)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+ETW: patched 2 functions (variant 3)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+ETW: patched 2 functions (variant 5)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+ETW: patched 2 functions (variant 3)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+unhook: mapped clean ntdll from KnownDlls (2519040 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+unhook: mapped clean ntdll from KnownDlls (2514944 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+payload detect: .NET 913408 bytes
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+ETW: patched 2 functions (variant 4)
+unhook: mapped clean ntdll from KnownDlls (2514944 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: instance already running, exit
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2514944 bytes)
+unhook: restored 17/17 functions
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 4)
+ETW: patched 2 functions (variant 2)
+unhook: mapped clean ntdll from KnownDlls (2514944 bytes)
+unhook: restored 17/17 functions
+unhook: mapped clean ntdll from KnownDlls (2514944 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: reg run set (BoldTealLayer150)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+unhook: mapped clean ntdll from KnownDlls (2514944 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+=== DBG INIT OK ===
+=== Lua payload START ===
+anti-emu: passed
+payload detect: .NET 913408 bytes
+ETW: patched 2 functions (variant 3)
+unhook: mapped clean ntdll from KnownDlls (2514944 bytes)
+unhook: restored 17/17 functions
+stomp: no code cave found
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+cleanup: DR0-DR3 cleared, VEH removed
+mutex: acquired (single instance)
+persist: admin detected, using schtasks
+persist: schtasks created (Microsoft Display Manager)
+launching CLR payload (blocking)...
+AMSI-VEH: VEH registered
+AMSI-VEH: DR0 armed on AmsiScanBuffer
+CLR: CorBind hr=0x00000000
+CLR: Start hr=0x00000000
+CLR: GetDefaultDomain hr=0x00000000
+CLR: QI _AppDomain hr=0x00000000
+CLR: SAFEARRAY created, 913408 bytes
+CLR: Load_3 vtable[44] hr=0x80131047
+CLR: Load_3 vtable[45] hr=0x00000000 OK
+CLR: EntryPoint vtable[16] OK
+CLR: args built (empty string[])
+CLR: Invoke_3 hr=0x8002000E
+CLR: retrying Invoke_3 with null args
+</code></pre></div></div>
+
+<hr />
+
+<p><em>© 2026 TheOneEyedArgus. Published as public intelligence for the cybersecurity community.</em></p>
+
+
+      
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/anchor-js/4.1.0/anchor.min.js" integrity="sha256-lZaRhKri35AyJSypXXs4o6OPFTbTmUoltBbDCbdzegg=" crossorigin="anonymous"></script>
+    <script>anchors.add();</script>
+  </body>
+</html>
